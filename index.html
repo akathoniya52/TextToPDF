@@ -1,0 +1,1317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TextToPDF — Text → PDF, 100% in your browser</title>
+<meta name="description" content="Convert pasted text or .txt files to a styled PDF — choose page size, margins, fonts, page numbers and more. 100% client-side: nothing is uploaded.">
+<script>
+/* Apply the saved (or system) theme BEFORE first paint, so dark-mode users never see a
+   light flash and the theme works even before/without the main bottom script. */
+  try {
+    var t2pSaved = '';
+    try { t2pSaved = (JSON.parse(localStorage.getItem('textTopdf.v1') || 'null') || { opts: {} }).opts.theme || ''; } catch (e) {}
+    if (t2pSaved !== 'dark' && t2pSaved !== 'light') {
+      t2pSaved = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    document.documentElement.setAttribute('data-theme', t2pSaved);
+  } catch (e) {
+    document.documentElement.setAttribute('data-theme', 'light');
+  }
+</script>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📄</text></svg>">
+
+<!-- pdfmake 0.3.3 from cdnjs; if these fail (offline), the inline loader below
+     switches to the vendored copies in ./vendor/ so the app still works. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.3.3/pdfmake.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.3.3/vfs_fonts.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.3.3/standard-fonts/Helvetica.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.3.3/standard-fonts/Times.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.3.3/standard-fonts/Courier.min.js"></script>
+
+<style>
+  :root{
+    --bg:#f4f6f9; --panel:#ffffff; --panel2:#f8fafc; --text:#1d2733; --muted:#5b6b7c;
+    --accent:#0c5cd8; --accent-ink:#ffffff; --ok:#0a7d43; --warn-ink:#7a4a00; --warn-bg:#fff4d6;
+    --border:#d9e1ea; --shadow:0 1px 2px rgba(16,32,56,.06), 0 4px 14px rgba(16,32,56,.05);
+    --radius:10px; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  [data-theme="dark"]{
+    --bg:#11161d; --panel:#191f29; --panel2:#141a22; --text:#e7edf4; --muted:#96a6b8;
+    --accent:#77b0ff; --accent-ink:#0b1424; --ok:#5dd693; --warn-ink:#ffdf8e; --warn-bg:#3a3016;
+    --border:#2a3542; --shadow:0 1px 2px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{background:var(--bg); color:var(--text); font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  a{color:var(--accent)}
+  .skip{position:absolute; left:-999px; top:8px; background:var(--accent); color:var(--accent-ink); padding:6px 10px; border-radius:8px}
+  .skip:focus{left:8px}
+
+  /* ---- header ---- */
+  header.topbar{display:flex; align-items:center; gap:14px; padding:14px 20px; max-width:1180px; margin:0 auto}
+  .brand{display:flex; align-items:center; gap:8px; font-weight:700; font-size:19px}
+  .brand .logo{color:var(--accent); font-size:20px}
+  .tagline{color:var(--muted); font-size:13px; margin:0; flex:1}
+  .icon-btn{background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:7px 10px; cursor:pointer; font-size:15px}
+  .icon-btn:hover{border-color:var(--accent)}
+
+  /* ---- presets ---- */
+  .presets{max-width:1180px; margin:0 auto 12px; padding:8px 20px 0; display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:13px; color:var(--muted)}
+  .presets button{background:var(--panel); color:var(--text); border:1px solid var(--border); border-radius:999px; padding:4px 12px; font-size:13px; cursor:pointer}
+  .presets button:hover{border-color:var(--accent); color:var(--accent)}
+
+  /* ---- layout ---- */
+  .layout{max-width:1180px; margin:0 auto; padding:0 20px; display:grid; grid-template-columns:minmax(0,1.6fr) minmax(300px,1fr); gap:16px; align-items:start}
+  @media (max-width:900px){ .layout{grid-template-columns:1fr} .tagline{display:none} }
+
+  .panel{background:var(--panel); border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow)}
+  .side .panel{margin-bottom:14px}
+  details.panel>summary{cursor:pointer; list-style:none; padding:11px 16px; font-weight:600; user-select:none}
+  details.panel>summary::-webkit-details-marker{display:none}
+  details.panel>summary::after{content:"▾"; float:right; color:var(--muted); transform:rotate(-90deg)}
+  details[open].panel>summary::after{transform:none}
+  details.panel .body{padding:0 16px 14px}
+
+  /* ---- editor ---- */
+  .editor{display:flex; flex-direction:column; min-height:420px}
+  .editor-head{display:flex; align-items:center; gap:10px; padding:11px 16px; border-bottom:1px solid var(--border)}
+  .editor-head h2{margin:0; font-size:15px}
+  .counts{color:var(--muted); font-size:12.5px; flex:1}
+  .link-btn{background:none; border:none; color:var(--accent); cursor:pointer; font-size:12.5px; padding:2px}
+  .link-btn:hover{text-decoration:underline}
+  #editor{flex:1; width:100%; border:none; outline:none; resize:vertical; padding:12px 16px; background:transparent; color:var(--text);
+          font:13.5px/1.55 var(--mono); min-height:300px}
+  #editor.fam-serif{font-family:Georgia,"Times New Roman",serif}
+  #editor.fam-sans{font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif}
+  .editor.drag{outline:2px dashed var(--accent); outline-offset:-6px}
+  .editor-tools{display:flex; gap:10px; align-items:center; padding:10px 16px; border-top:1px solid var(--border); flex-wrap:wrap}
+  .btn{display:inline-block; background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:8px;
+       padding:8px 14px; font-size:14px; cursor:pointer; text-align:center}
+  .btn:hover{border-color:var(--accent)}
+  .btn.primary{background:var(--accent); border-color:var(--accent); color:var(--accent-ink); font-weight:600}
+  .btn[disabled]{opacity:.55; cursor:progress}
+  .file-btn{position:relative; overflow:hidden}
+  .hint{margin:8px 16px 12px; color:var(--muted); font-size:12px}
+
+  /* ---- form rows ---- */
+  .row{display:flex; gap:10px; align-items:center; justify-content:space-between; margin:9px 0}
+  .row>label{font-size:13.5px; color:var(--text)}
+  .row .pair{display:flex; gap:6px; align-items:center}
+  select,input[type=number],input[type=text]{background:var(--panel2); color:var(--text); border:1px solid var(--border);
+       border-radius:7px; padding:6px 8px; font-size:13.5px; max-width:220px}
+  input[type=number]{width:74px}
+  input[type=range]{accent-color:var(--accent); width:130px}
+  input[type=checkbox]{accent-color:var(--accent); width:15px; height:15px}
+  .sub{display:flex; gap:6px; align-items:flex-start; margin:7px 0; font-size:13px; color:var(--muted)}
+  .sub input{margin-top:1px; flex:none}
+  .sub b{color:var(--text); font-weight:600}
+  .chip{display:inline-block; background:var(--panel2); border:1px solid var(--border); border-radius:999px; padding:2px 10px; font-size:12px; color:var(--muted)}
+  .note{font-size:11.5px; color:var(--muted); margin:2px 0 0 23px}
+
+  /* ---- status & warnings ---- */
+  .status-wrap{max-width:1180px; margin:6px auto 0; padding:0 20px}
+  #status{min-height:20px; font-size:13.5px; color:var(--muted)}
+  #status.err{color:#c0392b; font-weight:600}
+  #status.ok{color:var(--ok); font-weight:600}
+  [data-theme="dark"] #status.err{color:#ff8f7a}
+  #warnBox{display:none; margin:8px 0 0; padding:10px 12px; background:var(--warn-bg); color:var(--warn-ink);
+           border:1px solid rgba(0,0,0,.12); border-radius:8px; font-size:13px}
+  #warnBox.show{display:block}
+  #warnBox .warn-actions{margin-top:6px}
+
+  /* ---- actions ---- */
+  .actions{max-width:1180px; margin:12px auto 4px; padding:0 20px; display:flex; gap:10px; flex-wrap:wrap; align-items:center}
+  .actions .btn{padding:10px 18px}
+  .btn-note{color:var(--muted); font-size:12px}
+
+  /* ---- preview ---- */
+  .preview{max-width:1180px; margin:16px auto 30px; padding:0 20px}
+  .preview-head{display:flex; align-items:center; justify-content:space-between; margin-bottom:8px}
+  .preview-head h2{margin:0; font-size:15px}
+  #previewFrame{width:100%; height:72vh; border:1px solid var(--border); border-radius:var(--radius); background:var(--panel)}
+
+  footer{max-width:1180px; margin:0 auto 26px; padding:10px 20px; color:var(--muted); font-size:12.5px; display:flex; gap:14px; flex-wrap:wrap; align-items:center}
+  footer .sep{opacity:.5}
+
+  /* ---- overlay (self-tests) ---- */
+  .overlay{position:fixed; inset:0; background:rgba(9,14,20,.55); display:flex; align-items:center; justify-content:center; z-index:50}
+  .overlay .card{background:var(--panel); color:var(--text); border-radius:12px; padding:18px 20px; max-width:620px; width:92%;
+                 max-height:80vh; overflow:auto; box-shadow:0 10px 40px rgba(0,0,0,.35)}
+  .overlay h3{margin:0 0 10px}
+  .overlay pre{background:var(--panel2); border:1px solid var(--border); border-radius:8px; padding:10px; font-size:12px; overflow:auto; margin:0}
+  .hidden{display:none !important}
+
+  :focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:4px}
+</style>
+</head>
+<body>
+<a class="skip" href="#editor">Skip to the text editor</a>
+
+<header class="topbar">
+  <div class="brand"><span class="logo" aria-hidden="true">✦</span><h1 style="margin:0; font-size:19px">TextToPDF</h1></div>
+  <p class="tagline">Paste text → styled PDF. <strong>Nothing is uploaded</strong> — conversion runs entirely in your browser.</p>
+  <button id="themeToggle" class="icon-btn" type="button" aria-label="Switch to dark theme">🌙</button>
+</header>
+
+<div class="presets" aria-label="Presets">
+  <span>Presets:</span>
+  <button type="button" data-preset="document">📄 Document</button>
+  <button type="button" data-preset="log">🧾 Log file</button>
+  <button type="button" data-preset="code">💻 Code listing</button>
+  <button type="button" data-preset="compact">↧ Compact</button>
+</div>
+
+<main class="layout">
+  <section class="panel editor" id="editorPanel" aria-label="Text to convert">
+    <div class="editor-head">
+      <h2>Text</h2>
+      <span id="counts" class="counts">0 lines · 0 words · 0 chars</span>
+      <button id="loadSample" class="link-btn" type="button">Load sample</button>
+    </div>
+    <textarea id="editor" spellcheck="false" aria-label="Text to convert to PDF"
+      placeholder="Paste your text here, or drop a .txt / .md / .log file on this panel…"></textarea>
+    <div class="editor-tools">
+      <label class="btn file-btn">📂 Open file…
+        <input id="fileInput" type="file" accept=".txt,.text,.md,.markdown,.log,.csv,text/plain,text/markdown" hidden>
+      </label>
+      <label for="encodingOpt" style="font-size:13px;color:var(--muted)">Encoding</label>
+      <select id="encodingOpt" title="Encoding used when reading an uploaded file">
+        <option value="utf-8" selected>UTF-8 (default)</option>
+        <option value="iso-8859-1">ISO-8859-1 (Latin-1)</option>
+        <option value="windows-1252">Windows-1252 (Western)</option>
+        <option value="windows-1251">Windows-1251 (Cyrillic)</option>
+        <option value="windows-1254">Windows-1254 (Turkish)</option>
+        <option value="shift_jis">Shift_JIS (Japanese)</option>
+        <option value="gbk">GBK (Chinese)</option>
+        <option value="big5">Big5 (Traditional Chinese)</option>
+        <option value="euc-kr">EUC-KR (Korean)</option>
+        <option value="utf-16le">UTF-16 LE</option>
+        <option value="utf-16be">UTF-16 BE</option>
+      </select>
+      <button id="btnReset" class="link-btn" type="button" style="margin-left:auto">Start over</button>
+    </div>
+    <p class="hint">Only the page/appearance options are auto-applied; your characters are never rewritten unless you enable a formatting or cleanup toggle below.</p>
+  </section>
+
+  <aside class="side" aria-label="Options">
+    <details class="panel" open>
+      <summary>Page setup</summary>
+      <div class="body">
+        <div class="row">
+          <label for="paperSize">Paper size</label>
+          <div class="pair">
+            <select id="paperSize" aria-label="Paper size">
+              <option>A4</option><option>Letter</option><option>Legal</option><option>A3</option><option>A5</option><option>Custom…</option>
+            </select>
+          </div>
+        </div>
+        <div class="row hidden" id="customSizeRow">
+          <label for="paperW">Custom (mm)</label>
+          <div class="pair">
+            <input id="paperW" type="number" min="20" max="2000" value="210" aria-label="Custom width in mm"> ×
+            <input id="paperH" type="number" min="30" max="3000" value="297" aria-label="Custom height in mm">
+          </div>
+        </div>
+        <div class="row">
+          <label for="orientation">Orientation</label>
+          <select id="orientation">
+            <option value="portrait" selected>Portrait</option>
+            <option value="landscape">Landscape</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="columns">Columns</label>
+          <select id="columns" title="Column layout (plain-lines mode)">
+            <option value="1" selected>1</option><option value="2">2</option><option value="3">3</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="marginRange">Margin</label>
+          <div class="pair">
+            <input id="marginRange" type="range" min="0" max="60" value="25" aria-label="Margin in millimetres">
+            <input id="marginNum" type="number" min="0" max="60" value="25" aria-label="Margin in millimetres"> mm
+          </div>
+        </div>
+        <div class="row">
+          <label for="lineSpacing">Line spacing</label>
+          <select id="lineSpacing" aria-label="Line spacing">
+            <option value="1">1.0</option><option value="1.15" selected>1.15</option>
+            <option value="1.5">1.5</option><option value="2">2.0</option>
+          </select>
+        </div>
+      </div>
+    </details>
+
+    <details class="panel" open>
+      <summary>Font</summary>
+      <div class="body">
+        <div class="row">
+          <label for="fontFamily">Family</label>
+          <select id="fontFamily" aria-label="Font family">
+            <option value="sans" selected>Sans (Roboto)</option>
+            <option value="serif">Serif (Times)</option>
+            <option value="mono">Mono (Courier)</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="fontSize">Size</label>
+          <div class="pair">
+            <input id="fontSize" type="number" min="8" max="28" value="11" aria-label="Font size in points"> pt
+          </div>
+        </div>
+        <div class="sub">
+          <input type="checkbox" id="keepCols">
+          <span><b>Keep columns as printed</b> <span class="chip mono-chip">mono only</span><br>
+          <span class="note">Preserve space-aligned columns in log/code text by auto-shrinking the font instead of wrapping. Tabs become 8-column stops. Also applied in 2–3-column layouts.</span></span>
+        </div>
+        <div class="note" id="keepColsNote"></div>
+      </div>
+    </details>
+
+    <details class="panel" open>
+      <summary>Formatting (optional)</summary>
+      <div class="body">
+        <div class="sub">
+          <input type="checkbox" id="cbHeadings">
+          <span><b>Detect headings</b> — <code># Title</code>, ALL-CAPS lines, or lines underlined by <code>===</code> / <code>---</code> become styled headings</span>
+        </div>
+        <div class="sub">
+          <input type="checkbox" id="cbMarkdown">
+          <span><b>Parse light Markdown</b> — includes heading detection, <code>-</code> / <code>1.</code> lists, and inline <code>**bold**</code>, <code>*italic*</code>, <code>`code`</code></span>
+        </div>
+        <div class="note">Off by default: your text is laid out exactly as typed. Available in single-column mode. Never saved or sent anywhere.</div>
+      </div>
+    </details>
+
+    <details class="panel" id="cleanupPanel">
+      <summary>Cleanup (optional) <span class="chip hidden" id="cleanupCounts" style="margin-left:8px"></span></summary>
+      <div class="body">
+        <p class="note" style="margin:0 0 8px">Each toggle rewrites characters and shows how many it found. Off = untouched text.</p>
+        <div class="sub"><input type="checkbox" id="cleanupTrailing"><span><b>Strip trailing whitespace</b></span></div>
+        <div class="sub"><input type="checkbox" id="cleanupQuotes"><span><b>Normalize smart quotes</b> ’ ‘ “ ” → ' " </span></div>
+        <div class="sub"><input type="checkbox" id="cleanupDashes"><span><b>Normalize dashes</b> — – → -</span></div>
+        <div class="sub"><input type="checkbox" id="cleanupEllipsis"><span><b>Normalize ellipsis</b> … → ...</span></div>
+        <div class="sub"><input type="checkbox" id="cleanupNbsp"><span><b>Convert NBSP → space</b></span></div>
+        <div class="sub"><input type="checkbox" id="cleanupBlank"><span><b>Collapse 3+ blank lines</b> to one</span></div>
+      </div>
+    </details>
+
+    <details class="panel" open>
+      <summary>Output</summary>
+      <div class="body">
+        <div class="sub"><input type="checkbox" id="cbPageNums" checked><span><b>Page numbers</b> — “Page X of Y” in the footer</span></div>
+        <div class="sub"><input type="checkbox" id="cbLineNums"><span><b>Line numbers</b> — number every line (log-style)</span></div>
+        <div class="row">
+          <label for="headerText">Header text</label>
+          <input id="headerText" type="text" placeholder="(none)" maxlength="120">
+        </div>
+        <div class="row">
+          <label for="watermarkText">Watermark</label>
+          <input id="watermarkText" type="text" placeholder="e.g. DRAFT" maxlength="40">
+        </div>
+        <div class="row">
+          <label for="fileName">File name</label>
+          <input id="fileName" type="text" value="document.pdf" maxlength="80">
+        </div>
+        <div class="row">
+          <label for="pdfTitle">Title (metadata)</label>
+          <input id="pdfTitle" type="text" placeholder="(empty)" maxlength="120">
+        </div>
+        <div class="row">
+          <label for="pdfAuthor">Author (metadata)</label>
+          <input id="pdfAuthor" type="text" placeholder="(empty)" maxlength="80">
+        </div>
+        <div class="note">Metadata is written into the PDF file so readers show a proper title/author.</div>
+      </div>
+    </details>
+  </aside>
+</main>
+
+<div class="status-wrap">
+  <div id="warnBox" role="alert"></div>
+  <div id="status" role="status" aria-live="polite"></div>
+</div>
+
+<section class="actions" aria-label="Generate PDF">
+  <button id="btnDownload" class="btn primary" type="button">⬇ Download PDF</button>
+  <button id="btnPreview" class="btn" type="button">👁 Preview PDF</button>
+  <button id="btnOpenTab" class="btn" type="button">Open in new tab</button>
+  <button id="btnShare" class="btn" type="button">📤 Share PDF</button>
+  <span class="btn-note">Ctrl/⌘ + Enter downloads · files never leave this tab</span>
+</section>
+
+<section class="preview" id="previewWrap" hidden>
+  <div class="preview-head">
+    <h2>Preview <span class="chip" id="previewMeta"></span></h2>
+    <button id="btnClosePreview" class="link-btn" type="button">✕ close</button>
+  </div>
+  <iframe id="previewFrame" title="PDF preview"></iframe>
+</section>
+
+<footer>
+  <span>🔒 100% client-side: no uploads, no accounts, no tracking. PDFs are built in your browser with <a href="https://pdfmake.github.io" target="_blank" rel="noopener">pdfmake</a> (processes a vendored copy offline in <code>vendor/</code>).</span>
+  <span class="sep">·</span>
+  <button id="runSelfTests" class="link-btn" type="button">Run self-tests</button>
+</footer>
+
+<div id="selftestOverlay" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="selftestTitle">
+  <div class="card">
+    <h3 id="selftestTitle">Engine self-tests</h3>
+    <pre id="selftestOut" tabindex="0"></pre>
+    <div style="margin-top:10px; text-align:right"><button id="btnCloseSelftest" class="btn" type="button">Close</button></div>
+  </div>
+</div>
+
+<noscript><p style="max-width:700px;margin:20px auto;color:#c0392b">TextToPDF needs JavaScript — it runs the PDF conversion inside your browser. No scripts, no conversion. Nothing is uploaded, ever.</p></noscript>
+
+<script>
+/* Offline fallback: if the CDN scripts above failed to load (no internet),
+   load the vendored copies from ./vendor/ instead. Same library, same fonts. */
+if (typeof pdfMake === 'undefined') {
+  document.write('<script src="vendor/pdfmake.min.js"><\/script>');
+  document.write('<script src="vendor/vfs_fonts.min.js"><\/script>');
+  document.write('<script src="vendor/Helvetica.min.js"><\/script>');
+  document.write('<script src="vendor/Times.min.js"><\/script>');
+  document.write('<script src="vendor/Courier.min.js"><\/script>');
+}
+</script>
+
+<script>
+'use strict';
+/* ============================================================
+   TextToPDF — 100% client-side text → PDF converter
+   Engine notes:
+   - pdfmake 0.3.3 (MIT). Methods are promise-based on 0.3.x:
+     createPdf(dd).getBlob() / .getDataUrl() / .download(name).
+   - Fonts: Roboto (VFS) + standard-14 Times/Courier (auto-registered
+     by their bundle scripts). Standard-14 fonts cover ~ANSI only.
+   ============================================================ */
+
+/* ---------- 0. tiny helpers ---------- */
+const $ = (id) => document.getElementById(id);
+const on = (el, ev, fn, opt) => el && el.addEventListener(ev, fn, opt);
+const MM2PT = 72 / 25.4;                    // 1 mm ≈ 2.83465 pt
+const PTS_PER_MM = MM2PT;
+const fmtKB = (b) => b < 1024 * 1024 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / 1048576).toFixed(1)} MB`;
+const nextFrame = () => new Promise(r => setTimeout(r, 30)); // let the "Generating…" label paint
+const escapeHtml = (s) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+function sanitizeFileName(s) {
+  let n = String(s || '').replace(/[\\/:*?"<>|\u0000-\u001F]/g, '').replace(/\s+/g, ' ').trim();
+  if (!n) n = 'document';
+  return /\.(pdf)$/i.test(n) ? n : `${n}.pdf`;
+}
+function sanitizeMeta(s) { return String(s || '').replace(/[\u0000-\u001F]/g, ' ').trim(); }
+
+/* ---------- 1. fonts + script-coverage honesty check (feature 1.9) ---------- */
+const FONT_STACKS = {
+  sans:  { label: 'Sans (Roboto)',  primary: 'Roboto'  },
+  serif: { label: 'Serif (Times)',  primary: 'Times'   },
+  mono:  { label: 'Mono (Courier)', primary: 'Courier' }
+};
+function fontAvailable(name) {
+  try { return !!(window.pdfMake && window.pdfMake.fonts && window.pdfMake.fonts[name]); }
+  catch (e) { return false; }
+}
+function resolveFont(familyKey) {                       // graceful fallback chain
+  try {
+    const want = FONT_STACKS[familyKey].primary;
+    if (fontAvailable(want)) return want;
+    if (fontAvailable('Roboto')) return 'Roboto';
+    if (fontAvailable('Helvetica')) return 'Helvetica';
+    for (const k in window.pdfMake.fonts) return k;     // first registered font, last resort
+  } catch (e) {}
+  return null;
+}
+const CHAR_OK = {                                       // per-family coverage regexes
+  Roboto:   /[\u0000-\u02FF\u0370-\u04FF\u2000-\u206F\u20A0-\u20CF\u2122\u2212\u25CC]/,
+  Times:    null, Courier: null, Helvetica: null         // standard-14: ANSI-ish, see below
+};
+const CHAR_OK_STD = /[\u0000-\u00FF\u2010-\u2015\u2018-\u201F\u2022\u2026\u2030\u2032\u2033\u20AC\u2122\u2212\u25CF\u25A0\u25AA]/;
+/* scripts the built-in fonts cannot draw — used for the pre-download warning */
+const SCRIPT_RANGES = [
+  ['Greek',                      /[\u0370-\u03FF]/],
+  ['Cyrillic',                   /[\u0400-\u052F]/],
+  ['Hebrew',                     /[\u0590-\u05FF]/],
+  ['Arabic',                     /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/],
+  ['Devanagari (Hindi)',         /[\u0900-\u097F]/],
+  ['Bengali',                    /[\u0980-\u09FF]/],
+  ['Gurmukhi (Punjabi)',         /[\u0A00-\u0A7F]/],
+  ['Gujarati',                   /[\u0A80-\u0AFF]/],
+  ['Odia',                       /[\u0B00-\u0B7F]/],
+  ['Tamil',                      /[\u0B80-\u0BFF]/],
+  ['Telugu',                     /[\u0C00-\u0C7F]/],
+  ['Kannada',                    /[\u0C80-\u0CFF]/],
+  ['Malayalam',                  /[\u0D00-\u0D7F]/],
+  ['Sinhala',                    /[\u0D80-\u0DFF]/],
+  ['Thai',                       /[\u0E00-\u0E7F]/],
+  ['Lao',                        /[\u0E80-\u0EFF]/],
+  ['Tibetan',                    /[\u0F00-\u0FFF]/],
+  ['Myanmar (Burmese)',          /[\u1000-\u109F]/],
+  ['Georgian',                   /[\u10A0-\u10FF]/],
+  ['Ethiopic (Amharic)',         /[\u1200-\u137F]/],
+  ['Khmer',                      /[\u1780-\u17FF]/],
+  ['Japanese (kana)',            /[\u3040-\u30FF\u31F0-\u31FF]/],
+  ['CJK Chinese',                /[\u2E80-\u2EFF\u2F00-\u2FDF\u3100-\u312F\u3190-\u319F\u31A0-\u31BF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/],
+  ['Hangul (Korean)',            /[\u1100-\u11FF\u3131-\u318E\uAC00-\uD7AF]/],
+  ['Emoji',                      /[\u2600-\u27BF\u{1F000}-\u{1FAFF}\u{2190}-\u{21FF}]/u],
+  ['Symbols / private-use glyphs', /[\uE000-\uF8FF\u2B00-\u2BFF]/],
+  ['Box-drawing (code art)',     /[\u2500-\u257F]/],
+  ['Fullwidth forms',            /[\uFF01-\uFF5E]/]
+];
+function detectUnsupportedScripts(text, fontName) {
+  const ok = fontName === 'Roboto' ? CHAR_OK.Roboto : CHAR_OK_STD;
+  const found = new Set();
+  for (const [name, re] of SCRIPT_RANGES) {
+    for (const ch of text.match(re) || []) { if (!ok.test(ch)) { found.add(name); } }
+  }
+  return [...found];
+}
+
+/* ---------- 2. cleanup pass (feature 2.4) — pure ---------- */
+function applyCleanup(text, f) {
+  const counts = { trailing: 0, quotes: 0, dashes: 0, ellipsis: 0, nbsp: 0, blank: 0 };
+  let t = text;
+  if (f.quotes)   { counts.quotes   = (t.match(/[\u2018\u2019\u201C\u201D]/g) || []).length; t = t.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"'); }
+  if (f.dashes)   { counts.dashes   = (t.match(/[\u2013\u2014]/g) || []).length; t = t.replace(/[\u2013\u2014]/g, '-'); }
+  if (f.ellipsis) { counts.ellipsis = (t.match(/\u2026/g) || []).length; t = t.replace(/\u2026/g, '...'); }
+  if (f.nbsp)     { counts.nbsp     = (t.match(/\u00A0/g) || []).length; t = t.replace(/\u00A0/g, ' '); }
+  if (f.trailing) { const m = t.match(/[ \t]+(?=\n|$)/gm) || []; counts.trailing = m.length; t = t.replace(/[ \t]+(?=\n|$)/gm, ''); }
+  if (f.blank)    { t = t.replace(/\n{4,}/g, () => (counts.blank++, '\n\n')); }
+  return { text: t, counts };
+}
+
+/* ---------- 3. mono helpers (feature 1.5 + plan 2.3) — pure ---------- */
+function expandTabs(line, stop = 8) {                   // tabs → spaces on 8-column stops
+  let out = '';
+  for (const ch of line) {
+    if (ch === '\t') {
+      const pad = stop - (out.length % stop);
+      out += ' '.repeat(pad || stop);
+    } else {
+      out += ch;
+    }
+  }
+  return out.replace(/\u00A0/g, ' ');
+}
+function numberLines(lines) {                           // gutter numbers, right-aligned
+  const w = String(lines.length).length;
+  return lines.map((l, i) => `${String(i + 1).padStart(w)}  ${l}`);
+}
+function computeMonoFontSize(lines, availPt, baseSize) {// shrink font to keep printed columns
+  const mx = lines.reduce((m, l) => Math.max(m, l.length), 0);
+  if (!mx) return baseSize;
+  return clamp(Math.floor(availPt / (0.6002 * mx)), 4, baseSize);
+}
+function chunkLines(lines, n) {                         // sequential column chunks, balanced
+  const len = lines.length;
+  const base = Math.floor(len / n);
+  const rem = len % n;
+  const out = [];
+  let idx = 0;
+  for (let c = 0; c < n; c++) {
+    const size = base + (c < rem ? 1 : 0);
+    out.push(lines.slice(idx, idx + size));
+    idx += size;
+  }
+  return out;
+}
+
+/* ---------- 4. heading detection + light markdown (features 2.2/2.3) — pure ---------- */
+function inlineRuns(raw, codeFont) {
+  const out = []; let last = 0; let m;
+  const re = /(\*\*([^*\n]+)\*\*|__([^_\n]+)__|`([^`\n]+)`|\*([^*\n]+)\*)/g;
+  while ((m = re.exec(raw)) !== null) {
+    if (m.index > last) out.push({ text: raw.slice(last, m.index) });
+    if (m[2] !== undefined) out.push({ text: m[2], bold: true });
+    else if (m[3] !== undefined) out.push({ text: m[3], bold: true });
+    else if (m[4] !== undefined) out.push({ text: m[4], font: codeFont });
+    else if (m[5] !== undefined) out.push({ text: m[5], italics: true });
+    last = m.index + m[0].length;
+  }
+  if (last < raw.length) out.push({ text: raw.slice(last) });
+  return out.length ? out : [{ text: raw }];
+}
+function parseStructure(lines, useHeadings, useMarkdown) {
+  const blocks = []; let para = []; let list = null;
+  const isMdH = (l) => /^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(l);
+  const isUl  = (l) => /^ {0,3}[-*+]\s+(.+?)\s*$/.exec(l);
+  const isOl  = (l) => /^ {0,3}(\d{1,3})[.)]\s+(.+?)\s*$/.exec(l);
+  const allCaps = (l) => {
+    const s = l.trim();
+    return s.length >= 4 && /[A-Z]{3}/.test(s) && s === s.toUpperCase() && /[A-Z]/.test(s);
+  };
+  const flushPara = () => { if (para.length) { blocks.push({ t: 'p', text: para.join(' ') }); para = []; } };
+  const flushList = () => { if (list) { blocks.push({ t: list.type, items: list.items }); list = null; } };
+  const flushAll = () => { flushList(); flushPara(); };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i], next = lines[i + 1] ?? '';
+    let m;
+    if ((m = isMdH(line))) { flushAll(); if (useHeadings || useMarkdown) blocks.push({ t: 'h', level: clamp(m[1].length, 1, 3), text: m[2] }); else blocks.push({ t: 'p', text: line.trim() }); continue; }
+    if (line.trim() && next && /^ {0,3}(=+|-{3,})\s*$/.test(next)) {
+      flushAll();
+      if (useHeadings || useMarkdown) blocks.push({ t: 'h', level: next.trim()[0] === '=' ? 1 : 2, text: line.trim() });
+      else { blocks.push({ t: 'p', text: line.trim() }); blocks.push({ t: 'p', text: next.trim() }); }
+      i++; continue;
+    }
+    if ((useHeadings || useMarkdown) && allCaps(line)) { flushAll(); blocks.push({ t: 'h', level: 2, text: line.trim() }); continue; }
+    if (useMarkdown && (m = isUl(line))) { flushPara(); if (!list || list.type !== 'ul') { flushList(); list = { type: 'ul', items: [] }; } list.items.push(m[1]); continue; }
+    if (useMarkdown && (m = isOl(line))) { flushPara(); if (!list || list.type !== 'ol') { flushList(); list = { type: 'ol', items: [] }; } list.items.push(m[2]); continue; }
+    if (line.trim() === '') { flushAll(); continue; }
+    flushList(); para.push(line.trim());
+  }
+  flushAll();
+  return blocks;
+}
+
+/* ---------- 5. geometry (feature 1.3) — pure ---------- */
+const PAGE_SIZES_PT = {
+  A4: [595.28, 841.89], Letter: [612, 792], Legal: [612, 1008],
+  A3: [841.89, 1190.55], A5: [419.53, 595.28]
+};
+function buildGeometry(o) {
+  let w, h, pageSize, pageOrientation;
+  if (o.paper === 'Custom') {
+    w = clamp(o.customW, 20, 2000) * MM2PT;
+    h = clamp(o.customH, 30, 3000) * MM2PT;
+    if (o.orientation === 'landscape') { const t = w; w = h; h = t; }
+    pageSize = [round2(w), round2(h)];
+    pageOrientation = undefined;                        // custom sizes are pre-swapped above
+  } else {
+    pageSize = o.paper;                                 // pdfmake applies orientation for named sizes
+    pageOrientation = o.orientation;
+    [w, h] = o.orientation === 'landscape' ? PAGE_SIZES_PT[o.paper].slice().reverse() : PAGE_SIZES_PT[o.paper];
+  }
+  const m = clamp(o.marginMM, 0, 60) * MM2PT;
+  return {
+    pageSize, pageOrientation, pageW: round2(w), pageH: round2(h),
+    pageMargins: [round2(m), round2(m), round2(m), round2(m)],
+    marginPt: round2(m),
+    availW: round2(w - 2 * m),
+    colGap: 12
+  };
+  function round2(v) { return Math.round(v * 100) / 100; }
+}
+
+/* ---------- 6. document definition builder (feature 1.2 core) — pure ---------- */
+function buildDocDefinition(prep, o, geom, fonts) {
+  const fontName = fonts.fontName;
+  const codeFont = fonts.codeFont;
+  const size = o.fontSize;
+  const keepCols = o.keepCols && o.family === 'mono' && prep.kind === 'plain';
+  const styles = {
+    h1: { fontSize: Math.round(size * 1.85), bold: true, lineHeight: 1.25, margin: [0, 2, 0, 7] },
+    h2: { fontSize: Math.round(size * 1.4), bold: true, lineHeight: 1.25, margin: [0, 2, 0, 6] },
+    h3: { fontSize: Math.round(size * 1.15), bold: true, lineHeight: 1.25, margin: [0, 2, 0, 5] },
+    p:  { lineHeight: o.spacing, margin: [0, 0, 0, 2] },
+    li: { lineHeight: o.spacing }
+  };
+  let content;
+  let effSize = size;
+
+  /* mono column-preservation (feature 1.5): shrink the font instead of wrapping */
+  if (keepCols) {
+    const perCol = o.columns > 1 ? (geom.availW - (o.columns - 1) * geom.colGap) / o.columns : geom.availW;
+    effSize = computeMonoFontSize(prep.lines, perCol, size);
+  }
+  const mdRuns = (txt) => o.markdown ? inlineRuns(txt, codeFont) : txt;
+
+  if (prep.kind === 'struct') {
+    content = [];
+    for (const b of prep.blocks) {
+      if (b.t === 'h') content.push({ text: b.text, style: `h${b.level}` });
+      else if (b.t === 'ul') content.push({ ul: b.items.map(it => mdRuns(it)), style: 'li' });
+      else if (b.t === 'ol') content.push({ ol: b.items.map(it => mdRuns(it)), style: 'li' });
+      else content.push({ text: mdRuns(b.text), style: 'p' });
+    }
+  } else {
+    const lines = prep.lines;
+    if (o.columns > 1) {
+      const chunks = chunkLines(lines, o.columns);
+      const depth = Math.max(...chunks.map(c => c.length), 1);
+      const body = [];
+      for (let i = 0; i < depth; i++) {
+        body.push(chunks.map(c => ({ text: c[i] ?? ' ' })));
+      }
+      content = [{
+        table: {
+          widths: Array.from({ length: o.columns }, () => '*'),
+          body
+        },
+        layout: {
+          hLineWidth: () => 0,
+          vLineWidth: () => 0,
+          vLineColor: () => '#FFFFFF',
+          paddingLeft: (i) => (i > 0 ? geom.colGap : 0),
+          paddingRight: () => 0,
+          paddingTop: () => 0,
+          paddingBottom: () => 0
+        }
+      }];
+    } else {
+      content = [{ text: lines.join('\n'), style: 'p' }];
+    }
+  }
+
+  const dd = {
+    info: {
+      title: o.pdfTitle ? sanitizeMeta(o.pdfTitle) : undefined,
+      author: o.pdfAuthor ? sanitizeMeta(o.pdfAuthor) : undefined,
+      creator: 'TextToPDF (client-side)'
+    },
+    pageSize: geom.pageSize,
+    pageOrientation: geom.pageOrientation,
+    pageMargins: geom.pageMargins,
+    content,
+    defaultStyle: { font: fontName, fontSize: keepCols ? effSize : size, lineHeight: o.spacing, color: '#1d2733' },
+    styles
+  };
+
+  if (o.pageNumbers) dd.footer = (currentPage, pageCount) => ({
+    text: `Page ${currentPage} of ${pageCount}`,
+    alignment: 'center', fontSize: Math.max(8, size - 2), color: '#8a97a5', margin: [0, 2, 0, 0], font: fontName
+  });
+  if (o.headerText) dd.header = () => ({
+    text: sanitizeMeta(o.headerText), alignment: 'center', fontSize: Math.max(8, size - 2), color: '#8a97a5', margin: [0, 0, 0, 4], font: fontName
+  });
+  if (o.watermarkText) {
+    dd.watermark = {
+      text: sanitizeMeta(o.watermarkText), color: '#9aa8b5',
+      opacity: 0.18, bold: true, font: fontName, angle: 30
+    };
+  }
+  return dd;
+}
+
+/* ---------- 7. pipeline: raw text → prepared content — pure except logging ---------- */
+function prepareText(raw, o, ui) {
+  let text = String(raw).replace(/\r\n?/g, '\n');
+  if (o.cleanupActive) {
+    const res = applyCleanup(text, o.cleanup);
+    text = res.text;
+    if (ui) ui.cleanupCounts(res.counts);
+  }
+  const structured = o.columns === 1 && (o.headings || o.markdown);
+  let prep;
+  if (structured) {
+    prep = { kind: 'struct', blocks: parseStructure(text.split('\n'), o.headings, o.markdown) };
+    prep.lines = []; // for mono shrink math (rare path: cols>1 is always plain)
+  } else {
+    let lines = text.split('\n');
+    const keepCols = o.keepCols && o.family === 'mono';
+    if (keepCols) lines = lines.map((l) => expandTabs(l, 8));
+    if (o.lineNumbers) lines = numberLines(lines);
+    prep = { kind: 'plain', lines };
+  }
+  return prep;
+}
+
+/* ---------- 8. state, storage, theme ---------- */
+const STORE_KEY = 'textTopdf.v1';
+const state = { lastBlob: null, lastBlobUrl: null };
+
+const DEFAULT_OPTS = () => ({
+  paper: 'A4', customW: 210, customH: 297, orientation: 'portrait', columns: 1,
+  marginMM: 25, spacing: 1.15, family: 'sans', fontSize: 11, keepCols: false,
+  headings: false, markdown: false,
+  cleanup: { trailing: false, quotes: false, dashes: false, ellipsis: false, nbsp: false, blank: false },
+  pageNumbers: true, lineNumbers: false,
+  headerText: '', watermarkText: '', fileName: 'document.pdf', pdfTitle: '', pdfAuthor: '',
+  encoding: 'utf-8', theme: ''
+});
+let opts = DEFAULT_OPTS();
+
+function saveSoon() {
+  clearTimeout(saveSoon.t);
+  saveSoon.t = setTimeout(() => {
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify({ opts, text: $('editor').value }));
+    } catch (e) { /* quota exceeded on huge inputs — autosave silently pauses */ }
+  }, 400);
+}
+function restore() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); } catch (e) {}
+  if (!saved) return false;
+  opts = Object.assign(DEFAULT_OPTS(), saved.opts || {});
+  if (opts.cleanup) opts.cleanup = Object.assign(DEFAULT_OPTS().cleanup, opts.cleanup);
+  if (saved.text) { $('editor').value = saved.text; }
+  return true;
+}
+
+const themes = {
+  set(mode) {
+    document.documentElement.setAttribute('data-theme', mode);
+    $('themeToggle').textContent = mode === 'dark' ? '☀️' : '🌙';
+    $('themeToggle').setAttribute('aria-label', `Switch to ${mode === 'dark' ? 'light' : 'dark'} theme`);
+  },
+  toggle() {
+    const cur = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+    const next = cur === 'dark' ? 'light' : 'dark';
+    themes.set(next);
+    opts.theme = next;
+    clearTimeout(saveSoon.t);                                // pending saves can't overwrite our write
+    try { localStorage.setItem(STORE_KEY, JSON.stringify({ opts, text: $('editor').value })); } catch (e) {}
+  },
+  init() {
+    if (opts.theme === 'dark' || opts.theme === 'light') { themes.set(opts.theme); return; }
+    // The head script already applied the resolved system preference before first paint — keep it.
+    const early = document.documentElement.getAttribute('data-theme');
+    themes.set(early === 'dark' ? 'dark' : 'light');
+  }
+};
+
+/* ---------- 9. UI wiring ---------- */
+const statusEl = $('status'), warnEl = $('warnBox');
+function status(msg, type = '') {
+  statusEl.textContent = msg || '';
+  statusEl.className = type;
+}
+function setBusy(busy) {
+  for (const id of ['btnDownload', 'btnPreview', 'btnOpenTab', 'btnShare']) $(id).disabled = busy;
+}
+
+function updateCounts() {
+  const v = $('editor').value;
+  const lines = v === '' ? 0 : v.split('\n').length;
+  const words = (v.match(/\S+/g) || []).length;
+  $('counts').textContent = `${lines.toLocaleString()} lines · ${words.toLocaleString()} words · ${v.length.toLocaleString()} chars`;
+  saveSoon();
+  scheduleWarn();
+  updateCleanupCounts();
+  updateKeepColsNote();
+}
+function updateCleanupCounts() {
+  const anyActive = Object.values(opts.cleanup).some(Boolean);
+  const chip = $('cleanupCounts');
+  if (!anyActive || $('editor').value === '') { chip.classList.add('hidden'); return; }
+  const res = applyCleanup($('editor').value, opts.cleanup);
+  const bits = [];
+  if (opts.cleanup.trailing) bits.push(`${res.counts.trailing} trailing`);
+  if (opts.cleanup.quotes) bits.push(`${res.counts.quotes} quotes`);
+  if (opts.cleanup.dashes) bits.push(`${res.counts.dashes} dashes`);
+  if (opts.cleanup.ellipsis) bits.push(`${res.counts.ellipsis} ellipsis`);
+  if (opts.cleanup.nbsp) bits.push(`${res.counts.nbsp} NBSP`);
+  if (opts.cleanup.blank) bits.push(`${res.counts.blank} blank-runs`);
+  chip.textContent = bits.join(' · ');
+  chip.classList.remove('hidden');
+}
+function updateKeepColsNote() {
+  const note = $('keepColsNote');
+  if (!(opts.keepCols && opts.family === 'mono')) { note.textContent = ''; return; }
+  const availW = buildGeometry(readOptions()).availW - (opts.columns > 1 ? (opts.columns - 1) * 12 : 0);
+  const lines = $('editor').value.split('\n');
+  const eff = computeMonoFontSize(lines, availW, opts.fontSize);
+  const cols = lines.reduce((m, l) => Math.max(m, l.length), 0);
+  note.textContent = cols ? `Will print at ~${eff} pt to fit ${cols} columns on the page.` : '';
+}
+
+let warnT;
+function scheduleWarn() { clearTimeout(warnT); warnT = setTimeout(updateWarnings, 250); }
+function updateWarnings() {
+  const text = $('editor').value;
+  const fontName = resolveFont(opts.family);
+  const scripts = text ? detectUnsupportedScripts(text, fontName) : [];
+  if (!scripts.length) { warnEl.classList.remove('show'); warnEl.innerHTML = ''; return; }
+  warnEl.innerHTML =
+    `<strong>Heads-up:</strong> ${escapeHtml(scripts.join(', '))} characters can’t be drawn by “${escapeHtml(FONT_STACKS[opts.family].label)}” — ` +
+    `the PDF would show missing glyphs (□) for them.<br>For full font & script support use the system fallback (uses your browser’s own fonts, still 100% offline).` +
+    `<div class="warn-actions"><button id="btnFallbackPrint" class="btn" type="button">🖨 Print via system (Save as PDF)</button></div>`;
+  warnEl.classList.add('show');
+}
+
+/* file loading (feature 1.6) */
+function readFile(f) {
+  const label = opts.encoding;
+  let dec;
+  try { dec = new TextDecoder(label, { fatal: false, ignoreBOM: false }); }
+  catch (e) { status(`Encoding “${label}” isn’t supported by this browser — switched to UTF-8.`, 'err'); dec = new TextDecoder('utf-8'); }
+  const fr = new FileReader();
+  fr.onload = () => {
+    const text = dec.decode(new Uint8Array(fr.result));
+    $('editor').value = text;
+    const name = f.name.replace(/\.[^.]+$/, '');
+    opts.fileName = sanitizeFileName(name + '.pdf');
+    $('fileName').value = opts.fileName;
+    if (!$('pdfTitle').value) { opts.pdfTitle = name; $('pdfTitle').value = name; }
+    updateCounts();
+    status(`Loaded ${f.name} · ${(text.split('\n').length).toLocaleString()} lines · ${label}`, 'ok');
+  };
+  fr.onerror = () => status(`Couldn’t read ${f.name}.`, 'err');
+  fr.readAsArrayBuffer(f);
+}
+
+/* theme, presets, panels */
+function applyOptsToUI() {
+  $('paperSize').value = opts.paper === 'B5' ? 'A4' : (opts.paper === 'Custom' ? 'Custom…' : opts.paper);
+  $('customSizeRow').classList.toggle('hidden', opts.paper !== 'Custom');
+  $('paperW').value = opts.customW; $('paperH').value = opts.customH;
+  $('orientation').value = opts.orientation;
+  $('columns').value = String(opts.columns);
+  $('marginRange').value = opts.marginMM; $('marginNum').value = opts.marginMM;
+  $('lineSpacing').value = String(opts.spacing);
+  $('fontFamily').value = opts.family;
+  $('fontSize').value = opts.fontSize;
+  $('keepCols').checked = !!opts.keepCols;
+  $('keepCols').disabled = opts.family !== 'mono';
+  $('cbHeadings').checked = !!opts.headings;
+  $('cbMarkdown').checked = !!opts.markdown;
+  for (const k of Object.keys(opts.cleanup)) $(`cleanup${k[0].toUpperCase() + k.slice(1)}`).checked = !!opts.cleanup[k];
+  $('cbPageNums').checked = !!opts.pageNumbers;
+  $('cbLineNums').checked = !!opts.lineNumbers;
+  $('headerText').value = opts.headerText || '';
+  $('watermarkText').value = opts.watermarkText || '';
+  $('fileName').value = opts.fileName || 'document.pdf';
+  $('pdfTitle').value = opts.pdfTitle || '';
+  $('pdfAuthor').value = opts.pdfAuthor || '';
+  $('encodingOpt').value = opts.encoding || 'utf-8';
+  updateEditorFont();
+}
+function readOptions() {
+  const o = {
+    paper: $('paperSize').value === 'Custom…' ? 'Custom' : $('paperSize').value,
+    customW: +$('paperW').value || 210, customH: +$('paperH').value || 297,
+    orientation: $('orientation').value,
+    columns: +$('columns').value,
+    marginMM: +$('marginNum').value || 0,
+    spacing: parseFloat($('lineSpacing').value) || 1.15,
+    family: $('fontFamily').value,
+    fontSize: clamp(+$('fontSize').value || 11, 8, 28),
+    keepCols: $('keepCols').checked && $('fontFamily').value === 'mono',
+    headings: $('cbHeadings').checked, markdown: $('cbMarkdown').checked,
+    cleanup: {
+      trailing: $('cleanupTrailing').checked, quotes: $('cleanupQuotes').checked,
+      dashes: $('cleanupDashes').checked, ellipsis: $('cleanupEllipsis').checked,
+      nbsp: $('cleanupNbsp').checked, blank: $('cleanupBlank').checked
+    },
+    pageNumbers: $('cbPageNums').checked, lineNumbers: $('cbLineNums').checked,
+    headerText: $('headerText').value, watermarkText: $('watermarkText').value,
+    fileName: sanitizeFileName($('fileName').value),
+    pdfTitle: $('pdfTitle').value, pdfAuthor: $('pdfAuthor').value,
+    encoding: $('encodingOpt').value
+  };
+  o.cleanupActive = Object.values(o.cleanup).some(Boolean);
+  Object.assign(opts, o);
+  return o;
+}
+function updateEditorFont() {
+  const ed = $('editor');
+  ed.classList.toggle('fam-serif', opts.family === 'serif');
+  ed.classList.toggle('fam-sans', opts.family === 'sans');
+}
+function applyPreset(name) {
+  const P = {
+    document: { paper: 'A4', orientation: 'portrait', columns: 1, marginMM: 25, spacing: 1.5, family: 'sans', fontSize: 11, keepCols: false, headings: true, markdown: true, pageNumbers: true, lineNumbers: false },
+    log:      { paper: 'Letter', orientation: 'portrait', columns: 1, marginMM: 10, spacing: 1.15, family: 'mono', fontSize: 9, keepCols: true, headings: false, markdown: false, pageNumbers: false, lineNumbers: true },
+    code:     { paper: 'Letter', orientation: 'portrait', columns: 1, marginMM: 10, spacing: 1.0, family: 'mono', fontSize: 9, keepCols: true, headings: false, markdown: false, pageNumbers: false, lineNumbers: false },
+    compact:  { paper: 'A4', orientation: 'portrait', columns: 1, marginMM: 12, spacing: 1.0, family: 'sans', fontSize: 9, keepCols: false, headings: false, markdown: false, pageNumbers: true, lineNumbers: false }
+  };
+  Object.assign(opts, P[name] || {});
+  applyOptsToUI(); saveSoon(); updateCounts();
+  status(`Preset applied: ${name}`, 'ok');
+}
+
+/* ---------- 10. generation (features 1.2 core + 2.1 preview + 3.5 share) ---------- */
+async function producePdf(mode) {
+  readOptions();
+  const raw = $('editor').value;
+  if (!raw.trim()) { status('Nothing to convert — paste some text first.', 'err'); return null; }
+  const geom = buildGeometry(opts);
+  const prep = prepareText(raw, opts, null);
+  updateKeepColsNote();
+
+  const fontName = resolveFont(opts.family);
+  if (!fontName) { status('pdfmake/fonts failed to load — check your connection or the vendored copies in vendor/.', 'err'); return null; }
+  const codeFont = fontAvailable('Courier') ? 'Courier' : fontName;
+
+  let dd;
+  try { dd = buildDocDefinition(prep, opts, geom, { fontName, codeFont }); }
+  catch (e) { status(`Couldn’t build the document: ${e.message}`, 'err'); return null; }
+
+  setBusy(true);
+  status('Generating PDF… larger documents take a moment.');
+  await nextFrame(); // let the "Generating…" label paint before the heavy synchronous layout
+  try {
+    const blob = await window.pdfMake.createPdf(dd).getBlob();
+    return { blob, fileName: opts.fileName };
+  } catch (e) {
+    status(`PDF generation failed: ${e && e.message ? e.message : e}`, 'err');
+    return null;
+  } finally {
+    setBusy(false);
+  }
+}
+function saveBlob(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = fileName; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 15000);
+}
+async function handleDownload() {
+  const r = await producePdf('download');
+  if (!r) return;
+  saveBlob(r.blob, r.fileName);
+  status(`Saved ${r.fileName} (${fmtKB(r.blob.size)}). Not happy with the layout? Tweak options and re-download.`, 'ok');
+}
+async function handlePreview() {
+  const r = await producePdf('preview');
+  if (!r) return;
+  if (state.lastBlobUrl) URL.revokeObjectURL(state.lastBlobUrl);
+  state.lastBlob = r.blob;
+  state.lastBlobUrl = URL.createObjectURL(r.blob);
+  $('previewFrame').src = state.lastBlobUrl;
+  $('previewWrap').hidden = false;
+  $('previewMeta').textContent = fmtKB(r.blob.size);
+  status('Preview ready — adjust anything and preview again.', 'ok');
+}
+async function handleOpenTab() {
+  const preWin = window.open('', '_blank');   // open before async work to dodge popup blockers
+  const r = state.lastBlob ? (readOptions(), { blob: state.lastBlob }) : await producePdf('tab');
+  if (!r) { if (preWin) preWin.close(); return; }
+  const url = URL.createObjectURL(r.blob);
+  if (preWin) {
+    preWin.location.href = url;
+  } else {
+    const a = document.createElement('a');
+    a.href = url; a.target = '_blank'; a.rel = 'noopener';
+    document.body.appendChild(a); a.click(); a.remove();
+  }
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  status('Opened the PDF in a new tab.', 'ok');
+}
+async function handleShare() {
+  readOptions(); // fresh fileName even when reusing the previewed blob
+  const r = state.lastBlob ? { blob: state.lastBlob } : await producePdf('share');
+  if (!r) return;
+  const file = new File([r.blob], opts.fileName, { type: 'application/pdf' });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: opts.pdfTitle || opts.fileName }); status('Shared the PDF.', 'ok'); }
+    catch (e) { if (e && e.name !== 'AbortError') status(`Share cancelled or failed: ${e.message || e}`, 'err'); }
+  } else {
+    saveBlob(r.blob, opts.fileName);
+    status('System sharing isn’t available here — downloaded the PDF instead.', 'ok');
+  }
+}
+function printFallback() { // full text shaping via the system's own "Save as PDF" printer (companion to 1.9)
+  const fam = opts.family === 'mono' ? "ui-monospace,'Courier New',monospace"
+            : opts.family === 'serif' ? "Georgia,'Times New Roman',serif"
+            : "-apple-system,'Segoe UI',Roboto,Arial,sans-serif";
+  const bodyHtml = escapeHtml($('editor').value);
+  const win = window.open('', '_blank');
+  if (!win) { status('Print fallback needs popups — allow them for this tab and retry.', 'err'); return; }
+  win.document.write(
+    `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(sanitizeMeta($('pdfTitle').value) || 'Document')}</title>` +
+    `<style>@page{margin:${opts.marginMM}mm} body{font-family:${fam}; font-size:${opts.fontSize}pt; line-height:${opts.spacing};` +
+    ` margin:${opts.marginMM}mm; white-space:pre-wrap; word-break:break-word}</style></head>` +
+    `<body>${bodyHtml}<script>print()<\/script></body></html>`
+  );
+  win.document.close();
+  win.focus();
+}
+
+/* ---------- 11. self-tests (Phase 4.1 spirit, dependency-free) ---------- */
+const SUITE = [];
+const ok = (cond, msg) => { if (!cond) throw new Error(msg || 'assert failed'); };
+const eq = (a, b, msg) => ok(a === b, `${msg || ''} (${JSON.stringify(a)} !== ${JSON.stringify(b)})`);
+SUITE.push(
+  ['tabs expand to 8-col stops', () => eq(expandTabs('a\tbc'), 'a       bc')],
+  ['cleanup counts dashes', () => { const r = applyCleanup('a—b\u2013c', { trailing: false, quotes: false, dashes: true, ellipsis: false, nbsp: false, blank: false }); eq(r.counts.dashes, 2); eq(r.text, 'a-b-c'); }],
+  ['cleanup collapses blank runs', () => { const r = applyCleanup('a\n\n\n\n\nb', { trailing: false, quotes: false, dashes: false, ellipsis: false, nbsp: false, blank: true }); eq(r.text, 'a\n\nb'); eq(r.counts.blank, 1); }],
+  ['chunk 7 lines → 3 columns = 3/2/2', () => { const c = chunkLines('a b c d e f g'.split(' '), 3); eq(c.map(x => x.length).join(','), '3,2,2'); }],
+  ['mono autoshrink math', () => eq(computeMonoFontSize(['x'.repeat(100)], 400, 11), 6)],
+  ['inline markdown runs', () => { const runs = inlineRuns('Hi **b** ok', 'Courier'); eq(runs.length, 3); ok(runs[1].bold === true); }],
+  ['heading: # level', () => { const b = parseStructure(['# Title'].concat(Array(20).fill('x')), false, true); eq(b[0].t, 'h'); eq(b[0].level, 1); }],
+  ['heading: underline ===', () => { const b = parseStructure(['Title', '==='], true, false); eq(b[0].t, 'h'); eq(b[0].level, 1); }],
+  ['heading: ALL CAPS', () => { const b = parseStructure(['WEEKLY MACHINE REPORT'], true, false); eq(b[0].t, 'h'); }],
+  ['plain text falls back to paragraph when toggles off', () => { const b = parseStructure(['# Title'], false, false); eq(b[0].t, 'p'); }],
+  ['Arabic flagged for Roboto', () => { ok(detectUnsupportedScripts('سلام', 'Roboto').includes('Arabic')); ok(!detectUnsupportedScripts('hello', 'Roboto').length); }],
+  ['standard-14 flags Cyrillic', () => ok(detectUnsupportedScripts('Привет', 'Times').length > 0)],
+  ['geometry mm math', () => { const g = buildGeometry({ paper: 'A4', orientation: 'portrait', marginMM: 25 }); eq(g.pageMargins[0], 70.87); eq(g.pageW, 595.28); eq(g.pageOrientation, 'portrait'); }],
+  ['custom page + landscape swaps', () => { const g = buildGeometry({ paper: 'Custom', customW: 100, customH: 50, orientation: 'landscape', marginMM: 10 }); eq(g.pageW, Math.round(50 * MM2PT * 100) / 100); ok(g.pageOrientation === undefined); }],
+  ['filename sanitized', () => { eq(sanitizeFileName('my: report?.txt'), 'my report.txt.pdf'); eq(sanitizeFileName('  '), 'document.pdf'); }],
+  ['doc definition: footer + styled defaults', () => {
+    const o = Object.assign(DEFAULT_OPTS(), { pageNumbers: true });
+    const dd = buildDocDefinition({ kind: 'plain', lines: ['a', 'b'] }, o, buildGeometry(o), { fontName: 'Roboto', codeFont: 'Courier' });
+    ok(typeof dd.footer === 'function'); eq(dd.defaultStyle.font, 'Roboto'); ok(Array.isArray(dd.content));
+  }],
+  ['doc definition: mono shrink applied', () => {
+    const o = Object.assign(DEFAULT_OPTS(), { family: 'mono', keepCols: true, pageNumbers: false });
+    const dd = buildDocDefinition({ kind: 'plain', lines: ['x'.repeat(100)] }, o, buildGeometry(o), { fontName: 'Courier', codeFont: 'Courier' });
+    eq(dd.defaultStyle.fontSize, computeMonoFontSize(['x'.repeat(100)], buildGeometry(o).availW, o.fontSize));
+  }],
+  ['inline italics runs', () => { const runs = inlineRuns('x *y* z', 'Courier'); eq(runs.length, 3); ok(runs[1].italics === true); }],
+  ['headings render with styles in doc definition', () => {
+    const o = Object.assign(DEFAULT_OPTS(), { headings: true, pageNumbers: false });
+    const dd = buildDocDefinition({ kind: 'struct', blocks: [{ t: 'h', level: 1, text: 'T' }, { t: 'p', text: 'hello' }], lines: [] }, o, buildGeometry(o), { fontName: 'Roboto', codeFont: 'Courier' });
+    eq(dd.content[0].style, 'h1'); eq(dd.content[1].style, 'p');
+  }],
+  ['columns table depth covers uneven chunks', () => {
+    const o = Object.assign(DEFAULT_OPTS(), { columns: 2, pageNumbers: false });
+    const dd = buildDocDefinition({ kind: 'plain', lines: '1 2 3 4 5 6 7'.split(' ') }, o, buildGeometry(o), { fontName: 'Roboto', codeFont: 'Courier' });
+    eq(dd.content[0].table.body.length, 4); eq(dd.content[0].table.widths.join(','), '*,*');
+  }],
+  ['line numbers width padding', () => { const n = numberLines(['a', '', 'b']); eq(n[0], '1  a'); eq(n[1], '2  '); eq(n[2], '3  b'); }],
+  ['margin clamps beyond 60 mm', () => { const g = buildGeometry({ paper: 'A4', orientation: 'portrait', marginMM: 999 }); eq(g.pageMargins[0], 170.08); }],
+  ['metadata control chars neutralized', () => {
+    const o = Object.assign(DEFAULT_OPTS(), { pdfTitle: 'Ti\u0000tle', pageNumbers: false });
+    const dd = buildDocDefinition({ kind: 'plain', lines: ['a'] }, o, buildGeometry(o), { fontName: 'Roboto', codeFont: 'Courier' });
+    eq(dd.info.title, 'Ti tle'); // sanitizeMeta replaces control chars with spaces (keeps multi-line headers readable)
+  }],
+  ['tabs: NBSP collapsed to space', () => eq(expandTabs('a\u00A0b'), 'a b')],
+  ['cleanup counts two blank runs', () => { const r = applyCleanup('x\n\n\n\n\ny\n\n\n\n\nz', { trailing: false, quotes: false, dashes: false, ellipsis: false, nbsp: false, blank: true }); eq(r.counts.blank, 2); }],
+  ['cleanup normalizes all four quote marks', () => {
+    const r = applyCleanup('\u201Cx\u201D \u2018y\u2019', { trailing: false, quotes: true, dashes: false, ellipsis: false, nbsp: false, blank: false });
+    eq(r.counts.quotes, 4); eq(r.text, '"x" \'y\'');
+  }]
+);
+/* --- UI / integration suite — runs against the live page (real browser or test harness).
+       Snapshot-protected: tests never disturb the user's session state. --- */
+function snapshotState() {
+  return {
+    text: $('editor').value,
+    opts: JSON.parse(JSON.stringify(opts)),
+    theme: document.documentElement.getAttribute('data-theme'),
+    saved: (() => { try { return localStorage.getItem(STORE_KEY); } catch (e) { return null; } })()
+  };
+}
+function restoreState(s) {
+  clearTimeout(saveSoon.t);
+  try {
+    if (s.saved !== null) { localStorage.setItem(STORE_KEY, s.saved); } else { localStorage.removeItem(STORE_KEY); }
+  } catch (e) {}
+  opts = Object.assign(DEFAULT_OPTS(), s.opts || {});
+  applyOptsToUI();
+  $('editor').value = s.text;
+  const t = s.theme === 'dark' ? 'dark' : 'light';
+  themes.set(t);
+  opts.theme = t;
+  updateCounts();
+  clearTimeout(saveSoon.t);
+}
+const UI_SUITE = [
+  ['theme: applied attribute is dark or light at boot', () => {
+    const t = document.documentElement.getAttribute('data-theme');
+    ok(t === 'dark' || t === 'light', `unexpected attribute: ${t}`);
+  }],
+  ['theme: clicking toggle flips mode, icon and label', () => {
+    const html = document.documentElement;
+    const before = html.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+    $('themeToggle').click();
+    const after = html.getAttribute('data-theme');
+    eq(after, before === 'dark' ? 'light' : 'dark');
+    eq($('themeToggle').textContent, after === 'dark' ? '☀️' : '🌙');
+    eq($('themeToggle').getAttribute('aria-label'), `Switch to ${after === 'dark' ? 'light' : 'dark'} theme`);
+    $('themeToggle').click();
+    eq(html.getAttribute('data-theme'), before, 'second click did not restore');
+  }],
+  ['theme: init respects a saved dark theme', () => {
+    const savedOpts = JSON.parse(JSON.stringify(DEFAULT_OPTS()));
+    savedOpts.theme = 'dark';
+    localStorage.setItem(STORE_KEY, JSON.stringify({ opts: savedOpts, text: '' }));
+    ok(restore() === true, 'restore() did not find the session');
+    themes.init();
+    eq(document.documentElement.getAttribute('data-theme'), 'dark');
+  }],
+  ['theme: init keeps the pre-painted theme when nothing is saved', () => {
+    // nothing saved (no saved theme) + head script pre-painted 'light' ⇒ init must KEEP it,
+    // not re-derive/flip from matchMedia (that's what caused theme state churn).
+    try { localStorage.removeItem(STORE_KEY); } catch (e) {}
+    document.documentElement.setAttribute('data-theme', 'light');
+    opts = DEFAULT_OPTS(); // opts.theme === ''
+    themes.init();
+    eq(document.documentElement.getAttribute('data-theme'), 'light');
+    eq($('themeToggle').textContent, '🌙');
+  }],
+  ['counts: line/word/char update', () => {
+    $('editor').value = 'one two\nthree four';
+    updateCounts();
+    eq($('counts').textContent, '2 lines · 4 words · 18 chars');
+  }],
+  ['cleanup: rule counts appear in the chip', () => {
+    $('editor').value = 'a—b';
+    const box = $('cleanupDashes');
+    box.checked = true;
+    box.dispatchEvent(new Event('change'));
+    ok(!$('cleanupCounts').classList.contains('hidden'), 'chip should be visible');
+    ok($('cleanupCounts').textContent.includes('1 dashes'), `chip text: ${$('cleanupCounts').textContent}`);
+    box.checked = false;
+    box.dispatchEvent(new Event('change'));
+    ok($('cleanupCounts').classList.contains('hidden'), 'chip should hide again');
+  }],
+  ['presets: Log file applies mono + keep-columns + line numbers', () => {
+    const btn = Array.from(document.querySelectorAll('.presets [data-preset]')).find(b => b.dataset.preset === 'log');
+    ok(btn, 'preset button not found');
+    btn.click();
+    eq(opts.family, 'mono'); eq(opts.fontSize, 9); eq(opts.keepCols, true); eq(opts.lineNumbers, true);
+    eq($('fontFamily').value, 'mono'); eq($('keepCols').checked, true);
+    eq($('keepCols').disabled, false);
+  }],
+  ['generate: blocks an empty editor', async () => {
+    $('editor').value = '   ';
+    const r = await producePdf('download');
+    eq(r, null); ok(statusEl.textContent.includes('Nothing to convert'), statusEl.textContent);
+  }],
+  ['generate: produces a downloadable PDF', async () => {
+    if (typeof pdfMake === 'undefined') return 'skip';
+    $('editor').value = 'Hello PDF engine';
+    $('fileName').value = 'suite-test.pdf';
+    const r = await producePdf('download');
+    ok(r && r.blob && r.blob.size > 100, 'blob missing/too small');
+    eq(r.fileName, 'suite-test.pdf');
+  }],
+  ['preview: wires iframe and shows the panel', async () => {
+    if (typeof pdfMake === 'undefined') return 'skip';
+    $('editor').value = 'preview me';
+    await handlePreview();
+    eq($('previewWrap').hidden, false);
+    ok(String($('previewFrame').src).indexOf('blob:') === 0, `src: ${$('previewFrame').src}`);
+    $('previewWrap').hidden = true;
+    $('previewFrame').removeAttribute('src');
+  }],
+  ['file loading: drop event fills the editor', async () => {
+    if (window.__T2P_HARNESS !== true) return 'skip';
+    const f = { name: 'log notes.txt', __text: 'hello — world\nline two' };
+    const panel = $('editorPanel');
+    panel.fire('drop', { preventDefault() {}, dataTransfer: { files: [f] } });
+    await new Promise(r => setTimeout(r, 5));
+    ok($('editor').value.includes('hello — world'), $('editor').value.slice(0, 40));
+    eq(opts.fileName, 'log notes.pdf');
+    ok(statusEl.textContent.includes('Loaded'), statusEl.textContent);
+  }],
+  ['reset: clears storage and the editor', async () => {
+    $('editor').value = 'keepout';
+    saveSoon();
+    await sleep(450); // let the debounced save land
+    $('btnReset').click();
+    eq(localStorage.getItem(STORE_KEY), null);
+    eq($('editor').value, '');
+  }]
+];
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+async function runSelfTests() {
+  const lines = [];
+  let pass = 0, fail = 0, skip = 0;
+  const runOne = async (name, fn) => {
+    try {
+      const r = await fn();
+      if (r === 'skip') { skip++; lines.push(`⏭️ ${name}`); }
+      else { pass++; lines.push(`✅ ${name}`); }
+    } catch (e) { fail++; lines.push(`❌ ${name} — ${e && e.message ? e.message : e}`); }
+  };
+  for (const [name, test] of SUITE) await runOne(name, test);
+  const snap = snapshotState();
+  try { for (const [name, test] of UI_SUITE) await runOne(name, test); }
+  finally { restoreState(snap); }
+  lines.push('', `${pass} passed · ${skip} skipped · ${fail} failed`);
+  $('selftestOut').textContent = lines.join('\n');
+  $('selftestOverlay').classList.remove('hidden');
+  return { pass, skip, fail, text: lines.join('\n') };
+}
+
+/* ---------- 12. boot ---------- */
+function boot() {
+  const restored = restore();
+  themes.init();
+  applyOptsToUI();
+  if (!restored) applyPresetSilently();
+  updateCounts();
+
+  if (restored && $('editor').value) status('Restored your last session (saved only in this browser).', 'ok');
+  if (/[?&]selftest/.test(location.search)) runSelfTests();
+  if (typeof pdfMake === 'undefined') {
+    status('PDF library still loading from the offline vendor copy…', '');
+    setTimeout(() => {
+      if (typeof pdfMake === 'undefined') status('PDF library failed to load (no internet and vendor/ missing).', 'err');
+      else status('Loaded the offline vendored PDF engine.', 'ok');
+    }, 500);
+  }
+
+  on($('themeToggle'), 'click', themes.toggle);
+  on($('editor'), 'input', updateCounts);
+  on($('loadSample'), 'click', () => { $('editor').value = SAMPLE; updateCounts(); status('Sample text loaded — try a preset or Download PDF.', 'ok'); });
+  on($('btnReset'), 'click', () => {
+    localStorage.removeItem(STORE_KEY);
+    opts = DEFAULT_OPTS();
+    $('editor').value = '';
+    applyOptsToUI(); updateCounts();
+    $('previewWrap').hidden = true; $('previewFrame').removeAttribute('src');
+    status('Fresh start — saved state cleared.', 'ok');
+  });
+  on($('fileInput'), 'change', (e) => { const f = e.target.files && e.target.files[0]; if (f) readFile(f); e.target.value = ''; });
+  on($('encodingOpt'), 'change', () => { readOptions(); saveSoon(); });
+
+  /* options wiring */
+  for (const [id, ev] of [
+    ['paperSize', 'change'], ['orientation', 'change'], ['columns', 'change'],
+    ['lineSpacing', 'change'], ['fontFamily', 'change'], ['fontSize', 'input'],
+    ['cbHeadings', 'change'], ['cbMarkdown', 'change'], ['cbPageNums', 'change'], ['cbLineNums', 'change'],
+    ['headerText', 'input'], ['watermarkText', 'input'], ['fileName', 'input'], ['pdfTitle', 'input'], ['pdfAuthor', 'input'],
+    ['keepCols', 'change']
+  ]) on($(id), ev, () => {
+    readOptions();
+    if (id === 'fontFamily') {
+      $('keepCols').disabled = opts.family !== 'mono';
+      if (opts.family !== 'mono') { opts.keepCols = false; $('keepCols').checked = false; }
+      updateEditorFont();
+    }
+    saveSoon(); scheduleWarn(); updateKeepColsNote();
+  });
+  on($('marginRange'), 'input', () => { $('marginNum').value = $('marginRange').value; readOptions(); saveSoon(); updateKeepColsNote(); });
+  on($('marginNum'), 'input', () => { const v = clamp(+$('marginNum').value || 0, 0, 60); $('marginRange').value = v; readOptions(); saveSoon(); updateKeepColsNote(); });
+  on($('paperSize'), 'change', () => $('customSizeRow').classList.toggle('hidden', $('paperSize').value !== 'Custom…'));
+  on($('paperW'), 'change', () => { readOptions(); saveSoon(); });
+  on($('paperH'), 'change', () => { readOptions(); saveSoon(); });
+  for (const k of ['trailing', 'quotes', 'dashes', 'ellipsis', 'nbsp', 'blank'])
+    on($(`cleanup${k[0].toUpperCase() + k.slice(1)}`), 'change', () => { readOptions(); saveSoon(); updateCleanupCounts(); });
+
+  document.querySelectorAll('.presets [data-preset]').forEach(b => on(b, 'click', () => applyPreset(b.dataset.preset)));
+
+  /* drag & drop (feature 1.6) */
+  const panel = $('editorPanel');
+  on(panel, 'dragover', (e) => { e.preventDefault(); panel.classList.add('drag'); });
+  on(panel, 'dragleave', () => panel.classList.remove('drag'));
+  on(panel, 'drop', (e) => { e.preventDefault(); panel.classList.remove('drag'); const f = e.dataTransfer.files && e.dataTransfer.files[0]; if (f) readFile(f); });
+
+  /* actions (features 1.2, 2.1, 3.5) */
+  on($('btnDownload'), 'click', handleDownload);
+  on($('btnPreview'), 'click', handlePreview);
+  on($('btnOpenTab'), 'click', handleOpenTab);
+  on($('btnShare'), 'click', handleShare);
+  on($('btnClosePreview'), 'click', () => { $('previewWrap').hidden = true; });
+  on(document, 'keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); handleDownload(); }
+    if (e.key === 'Escape') $('selftestOverlay').classList.add('hidden');
+  });
+
+  /* self-tests */
+  on($('runSelfTests'), 'click', runSelfTests);
+  on($('btnCloseSelftest'), 'click', () => $('selftestOverlay').classList.add('hidden'));
+
+  /* warning-region delegation (button re-renders with the banner) */
+  on(warnEl, 'click', (e) => { if (e.target && e.target.id === 'btnFallbackPrint') printFallback(); });
+
+  $('editor').focus();
+}
+function applyPresetSilently() { applyPreset('document'); }
+const SAMPLE = [
+  '# Weekly machine report', '',
+  '## Shipped this week',
+  '- Import wizard cleanup **done**',
+  '- New exporter `pdf-fallback` *behind a flag*', '',
+  '## Open questions',
+  '1. Keep the checkbox cleanup pass as opt-in?',
+  '2. Preset names — good enough?', '',
+  'Sensor log (tab-separated → pick the Mono font + “Keep columns as printed”):',
+  'id\ttemp\thum',
+  '101\t21.4\t40%',
+  '102\t22.1\t41%', '',
+  'Smart text demo: “quoted” — dash · ellipsis … offence-free ~tilde~.',
+  'Everything here was converted in your browser. Nothing was uploaded.'
+].join('\n');
+
+boot();
+</script>
+</body>
+</html>
