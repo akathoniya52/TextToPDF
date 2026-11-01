@@ -1,0 +1,130 @@
+# ============================================================
+# TextToPDF — CI (plan item 4.5)
+#
+# 1. node-tests       — runs the dependency-free headless suite
+#                       (47 checks: static file contracts, theme
+#                       head-script, real app on a DOM stub incl.
+#                       engine + UI suites) on a Node matrix,
+#                       plus a relative-link audit of the docs.
+# 2. browser-selftest — runs the app's own in-browser suite
+#                       (?selftest) in real headless Chrome and
+#                       fails on ❌ / missing pass counts; also
+#                       asserts the theme attribute is applied.
+# 3. deploy-pages     — on merges to main, deploys the site to
+#                       GitHub Pages (the static host that later
+#                       unlocks plan 3.4, the PWA).
+#
+# No packages are installed anywhere: everything runs with
+# what's on the runner, matching the project's zero-dependency
+# philosophy.
+# ============================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  node-tests:
+    name: Node ${{ matrix.node }} — headless tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          check-latest: true
+
+      - name: Run test suite (test/run-tests.js)
+        run: |
+          node --version
+          node test/run-tests.js
+
+      - name: Validate doc links (plan 4.5)
+        run: node test/check-links.js
+
+  browser-selftest:
+    name: Real-Chrome in-app self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the app's ?selftest suite in headless Chrome
+        run: |
+          set -euo pipefail
+          CHROME_BIN="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium-browser || command -v chromium)"
+          echo "Using Chrome: ${CHROME_BIN}"
+          DOM="$(mktemp)"
+          "${CHROME_BIN}" \
+            --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage \
+            --disable-extensions --no-first-run --virtual-time-budget=15000 \
+            --dump-dom "file://${{ github.workspace }}/index.html?selftest" > "${DOM}"
+
+          echo "Theme attribute on <html> (pre-paint check):"
+          grep -o '<html[^>]*data-theme="[a-z]*"' "${DOM}" || {
+            echo "::error::data-theme attribute missing — theme did not apply before first paint"
+            exit 1
+          }
+
+          # Extract ONLY the self-test output block: the dumped DOM also contains the
+          # app's <script> source, which itself contains ❌/· glyphs — grepping the
+          # whole DOM would false-fail.
+          OUT="$(awk '/pre id="selftestOut"/{f=1} f{print} /<\/pre>/{f=0}' "${DOM}")"
+          if [ -z "${OUT}" ]; then
+            echo "::error::self-test output block not found in DOM — suite did not finish"
+            exit 1
+          fi
+
+          if grep -q '❌' <<<"${OUT}"; then
+            echo "::error::Browser self-tests reported failures:"
+            grep '❌' <<<"${OUT}" || true
+            exit 1
+          fi
+
+          SUMMARY="$(grep -oE '[0-9]+ passed · [0-9]+ skipped · [0-9]+ failed' <<<"${OUT}" | tail -1)"
+          echo "Self-test summary: ${SUMMARY:-<none found>}"
+          case "${SUMMARY:-}" in
+            *"0 failed"*) echo "✅ Browser self-tests clean" ;;
+            *) echo "::error::Unexpected self-test summary: ${SUMMARY:-none}"; exit 1 ;;
+          esac
+
+  deploy-pages:
+    name: Deploy to GitHub Pages
+    needs: [node-tests, browser-selftest]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

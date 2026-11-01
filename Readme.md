@@ -1,5 +1,7 @@
 # ✦ TextToPDF
 
+[![CI](https://github.com/akathoniya52/TextToPDF/actions/workflows/ci.yml/badge.svg)](https://github.com/akathoniya52/TextToPDF/actions/workflows/ci.yml)
+
 A fast, private web app that converts pasted text or `.txt` / `.md` / `.log` files into a **styled PDF** — with full control over page size, orientation, margins, fonts, line spacing, lists, headings, page numbers, watermarks and more.
 
 Built with plain **HTML, CSS, and JavaScript** + [pdfmake](https://pdfmake.github.io) (MIT) loaded from CDN with a vendored offline copy. No backend, no accounts, no uploads — **the PDF is generated entirely inside your browser tab.**
@@ -60,8 +62,11 @@ TextToPDF/
 ├── index.html                 — the complete app (UI, styles, layout engine, self-tests)
 ├── plan.md                    — researched feature roadmap & status board
 ├── Readme.md
+├── .github/workflows/
+│   └── ci.yml                 — tests (Node matrix) · real-Chrome self-test · Pages deploy
 ├── test/
-│   └── run-tests.js           — headless test runner: node test/run-tests.js (no dependencies)
+│   ├── run-tests.js           — headless test runner: node test/run-tests.js (no dependencies)
+│   └── check-links.js         — relative-link audit for tracked .md docs
 └── vendor/                    — offline fallback copies of pdfmake + fonts (plan 4.4)
     ├── pdfmake.min.js
     ├── vfs_fonts.min.js
@@ -77,6 +82,11 @@ Three layers, all dependency-free (plain Node ≥ 18):
 1. **Run everything headless:** `node test/run-tests.js` — 47 checks: static file contracts (5 CDN scripts, 3 inline blocks compile, every referenced element id exists, dark-theme CSS variable completeness, vendor integrity), the theme head-script against system/saved/garbage storage, and the real app bootstrapped against a DOM stub running the app's own engine + UI suites (theme toggle flip + persistence, counters, cleanup chip, presets, generation, preview, file-drop, reset).
 2. **In the browser:** footer → *Run self-tests* (or open with `?selftest`). 26 engine + 12 UI assertions; harness-only tests self-skip in real browsers. Chrome headless verified: 37 passed · 0 failed with the theme applied before first paint.
 3. **Engine + real PDF smoke:** vendored pdfmake was exercised in Node to confirm real PDF output (std-14 fonts 2.6 KB; Roboto with embedded TTF `/FontFile`).
+
+**CI (`.github/workflows/ci.yml`)** runs all of this on every push to `main` / PR / manual dispatch:
+- **Node matrix (20 / 22 / 24)** — `node test/run-tests.js` (47 checks) + `node test/check-links.js` (relative-link audit of the docs)
+- **Real-Chrome job** — runs the app's `?selftest` suite in headless Chrome and fails on any ❌ or missing pass count; also asserts the theme attribute is applied pre-paint
+- **Pages deploy** — after `main` passes both jobs, the site is deployed automatically (needs a one-time *Settings → Pages → Source: GitHub Actions* enablement; every later run is hands-off). This is the static hosting that unlocks `plan.md` 3.4 (PWA).
 
 ## 🚀 Getting Started
 
